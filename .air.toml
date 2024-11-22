@@ -1,0 +1,13 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "bash ./build.sh"
+  bin = "./tmp/main"
+  delay = 1000
+  exclude_dir = ["assets", "tmp", "vendor"]
+  include_ext = ["go", "tpl", "tmpl", "html"]
+  include_dir = ["cmd", "pkg"]
+  exclude_regex = ["_test\\.go"]
+
+  clean_on_exit = true
