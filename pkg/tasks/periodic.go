@@ -185,6 +185,10 @@ func (tm *TaskManager) sendingStatsToMongo() error {
 		return fmt.Errorf("failed to unmarshal sessions: %v", err)
 	}
 
+	if len( sessions ) == 0{
+		return nil
+	}
+
 	aggregatedStats := make(map[string]*IPStats)
 
 	for _, session := range sessions {
