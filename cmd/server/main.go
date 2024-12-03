@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"os"
@@ -10,23 +9,17 @@ import (
 
 	"go-oauth/controller/api"
 	"go-oauth/pkg/auth"
-	"go-oauth/pkg/dns"
-	"go-oauth/pkg/network"
 	"go-oauth/pkg/tasks"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
-	"github.com/redis/go-redis/v9"
 )
 
 var (
 	authConfig  auth.Config
 	wg          sync.WaitGroup
-	monitor     *network.Monitor
 	JWT_SECRET  string
 	JWT_EXPIRY  time.Duration
-	redisClient *redis.Client
-	dnsCache    *dns.Cache
 	taskManager *tasks.TaskManager
 )
 
@@ -56,7 +49,6 @@ func main() {
 
 	// Get intervals from environment variables
 	task1Interval := getEnvDuration("TASK1_INTERVAL", "1m")
-	task2Interval := getEnvDuration("TASK2_INTERVAL", "10s")
 
 	// Update auth config
 	authConfig = auth.Config{
@@ -64,47 +56,13 @@ func main() {
 		JWTExpiry: JWT_EXPIRY,
 	}
 
-	// Initialize the DNS cache BEFORE setting up routes
-	dnsCache = dns.NewCache()
-
-	// Initialize Redis client
-	redisClient = redis.NewClient(&redis.Options{
-		Addr:     os.Getenv("REDIS_ADDR"),
-		Password: os.Getenv("REDIS_PASSWORD"),
-		DB:       0,
-	})
-
 	// Routes
 	r.POST("/social-login", api.HandleSocialLogin(authConfig))
-
-	// Network routes
-	r.POST("/start-monitoring", api.HandleStartMonitoring(&monitor))
-	r.POST("/stop-monitoring", api.HandleStopMonitoring(&monitor))
-	r.GET("/network-stats", api.HandleGetNetworkStats(&monitor, dnsCache))
 
 	protected := r.Group("/")
 	protected.Use(auth.AuthMiddleware(authConfig))
 	{
 		//protected.GET("/protected-route", yourProtectedHandler)
-	}
-
-	// Start network monitoring on default interface
-	defaultInterface := os.Getenv("DEFAULT_NETWORK_INTERFACE")
-	if defaultInterface == "" {
-		defaultInterface = "eth0" // fallback to eth0 if not specified
-	}
-
-	monitor = network.NewMonitor()
-	if err := monitor.Start(defaultInterface); err != nil {
-		log.Printf("Warning: Failed to start initial network monitoring: %v", err)
-	} else {
-		log.Printf("Network monitoring started on interface: %s", defaultInterface)
-	}
-
-	// Test Redis connection
-	ctx := context.Background()
-	if _, err := redisClient.Ping(ctx).Result(); err != nil {
-		log.Printf("Warning: Redis connection failed: %v", err)
 	}
 
 	// Initialize TaskManager
@@ -113,14 +71,14 @@ func main() {
 		log.Fatal("MONGODB_URI environment variable is required")
 	}
 
-	taskManager, err = tasks.NewTaskManager(monitor, redisClient, dnsCache, mongoURI)
+	taskManager, err = tasks.NewTaskManager(mongoURI)
 	if err != nil {
 		log.Fatalf("Failed to initialize task manager: %v", err)
 	}
 	defer taskManager.Close()
 
 	// Start the periodic tasks
-	taskManager.StartPeriodicTasks(task1Interval, task2Interval)
+	taskManager.StartPeriodicTasks(task1Interval)
 
 	// Add this before starting the goroutine
 	wg.Add(1)

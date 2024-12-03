@@ -7,6 +7,28 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func HandleLoginInfo(authConfig auth.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var request struct {
+			Gmail string `json:"gmail" binding:"required,email"`
+			IP    string `json:"ip" binding:"required"`
+		}
+
+		if err := c.BindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Invalid request format",
+			})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message": "Login info saved",
+			"gmail":   request.Gmail,
+			"ip":      request.IP,
+		})
+	}
+}
+
 func HandleSocialLogin(authConfig auth.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var request auth.SocialLoginRequest
