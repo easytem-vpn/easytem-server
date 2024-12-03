@@ -4,29 +4,83 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
-	"sort"
+	"net/http"
+	"os"
+	"regexp"
 	"time"
 
-	"go-oauth/pkg/dns"
-	"go-oauth/pkg/network"
-	"go-oauth/pkg/utils"
-
-	"github.com/redis/go-redis/v9"
+	"github.com/icholy/digest"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type TaskManager struct {
-	monitor     *network.Monitor
-	redisClient *redis.Client
-	dnsCache    *dns.Cache
-	stopChan    chan struct{}
-	mongoClient *mongo.Client
+	stopChan     chan struct{}
+	mongoClient  *mongo.Client
+	username     string
+	password     string
+	uri          string
+	dnsStats     map[string]*DNSStats
+	lastStopTime int64
+	lastID       string
 }
 
-func NewTaskManager(monitor *network.Monitor, redisClient *redis.Client, dnsCache *dns.Cache, mongoURI string) (*TaskManager, error) {
+type Session struct {
+	FirstPacket  int64       `json:"firstPacket"`
+	TotDataBytes int         `json:"totDataBytes"`
+	IPProtocol   int         `json:"ipProtocol"`
+	Node         string      `json:"node"`
+	LastPacket   int64       `json:"lastPacket"`
+	Source       Endpoint    `json:"source"`
+	Destination  Endpoint    `json:"destination"`
+	Client       Traffic     `json:"client"`
+	Server       Traffic     `json:"server"`
+	Network      NetworkInfo `json:"network"`
+	DNS          DNSInfo     `json:"dns"`
+	ID           string      `json:"id"`
+}
+
+type Endpoint struct {
+	AS      map[string]interface{} `json:"as"`
+	Geo     map[string]interface{} `json:"geo"`
+	Packets int                    `json:"packets"`
+	Port    int                    `json:"port"`
+	IP      string                 `json:"ip"`
+	Bytes   int                    `json:"bytes"`
+}
+
+type Traffic struct {
+	Bytes int `json:"bytes"`
+}
+
+type NetworkInfo struct {
+	Packets int `json:"packets"`
+	Bytes   int `json:"bytes"`
+}
+
+type DNSInfo struct {
+	Host []string `json:"host"`
+}
+
+type IPStats struct {
+	TotalBytes int
+	User       string
+}
+
+type DNSStats struct {
+	DNS string
+}
+
+type DomainStats struct {
+	Domain     string `json:"domain"`
+	TotalBytes int64  `json:"total_bytes"`
+	User       string `json:"user"`
+}
+
+func NewTaskManager(mongoURI string) (*TaskManager, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -40,37 +94,38 @@ func NewTaskManager(monitor *network.Monitor, redisClient *redis.Client, dnsCach
 	}
 
 	return &TaskManager{
-		monitor:     monitor,
-		redisClient: redisClient,
-		dnsCache:    dnsCache,
-		stopChan:    make(chan struct{}),
-		mongoClient: mongoClient,
+		stopChan:     make(chan struct{}),
+		mongoClient:  mongoClient,
+		username:     os.Getenv("ARKIME_USERNAME"),
+		password:     os.Getenv("ARKIME_PASSWORD"),
+		uri:          os.Getenv("ARKIME_URI"),
+		dnsStats:     make(map[string]*DNSStats),
+		lastStopTime: time.Now().Unix() - 300,
+		lastID:       "",
 	}, nil
 }
 
-func (tm *TaskManager) StartPeriodicTasks(task1Interval, task2Interval time.Duration) {
-	go tm.runPeriodicTasks(task1Interval, task2Interval)
+func (tm *TaskManager) StartPeriodicTasks(task1Interval time.Duration) {
+	go tm.runPeriodicTasks(task1Interval)
 }
 
 func (tm *TaskManager) Stop() {
 	close(tm.stopChan)
 }
 
-func (tm *TaskManager) runPeriodicTasks(task1Interval, task2Interval time.Duration) {
+func (tm *TaskManager) runPeriodicTasks(task1Interval time.Duration) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("Recovered from panic in periodic tasks: %v", r)
 			// Restart the periodic tasks
-			go tm.runPeriodicTasks(task1Interval, task2Interval)
+			go tm.runPeriodicTasks(task1Interval)
 		}
 	}()
 
 	task1Ticker := time.NewTicker(task1Interval)
-	task2Ticker := time.NewTicker(task2Interval)
 
 	defer func() {
 		task1Ticker.Stop()
-		task2Ticker.Stop()
 	}()
 
 	for {
@@ -81,114 +136,138 @@ func (tm *TaskManager) runPeriodicTasks(task1Interval, task2Interval time.Durati
 			if err := tm.sendingStatsToMongo(); err != nil {
 				log.Printf("Error in sendingStatsToMongo: %v", err)
 			}
-		case <-task2Ticker.C:
-			if err := tm.fetchingNetworkStats(); err != nil {
-				log.Printf("Error in fetchingNetworkStats: %v", err)
-			}
 		}
 	}
 }
 
 func (tm *TaskManager) sendingStatsToMongo() error {
-	ctx := context.Background()
+	currentTime := time.Now().Unix()
+	startTime := tm.lastStopTime
+	tm.lastStopTime = currentTime
 
-	keys, err := tm.redisClient.Keys(ctx, "network_stats:*").Result()
-	if err != nil {
-		return fmt.Errorf("failed to get keys from Redis: %v", err)
+	t := &digest.Transport{
+		Username: tm.username,
+		Password: tm.password,
 	}
 
-	if len(keys) == 0 {
-		log.Println("No statistics found in Redis")
+	url := fmt.Sprintf("%s/sessions.json?order=firstPacket:desc&startTime=%d&stopTime=%d&facets=1&length=2000000",
+		tm.uri, startTime, currentTime)
+
+	req, err := http.NewRequest("GET", url, nil)
+
+	if err != nil {
+		log.Fatalln(err)
 		return nil
 	}
 
-	collection := tm.mongoClient.Database("network_stats").Collection("traffic")
-
-	for _, key := range keys {
-		jsonData, err := tm.redisClient.Get(ctx, key).Result()
-		if err != nil {
-			log.Printf("Error getting data for key %s: %v", key, err)
-			continue
-		}
-
-		var statsEntry map[string]interface{}
-		if err := json.Unmarshal([]byte(jsonData), &statsEntry); err != nil {
-			log.Printf("Error unmarshaling data for key %s: %v", key, err)
-			continue
-		}
-
-		statsEntry["_id"] = key
-		statsEntry["recorded_at"] = time.Now()
-
-		opts := options.Update().SetUpsert(true)
-		filter := bson.M{"_id": key}
-		update := bson.M{"$set": statsEntry}
-
-		_, err = collection.UpdateOne(ctx, filter, update, opts)
-		if err != nil {
-			log.Printf("Error upserting document for key %s: %v", key, err)
-			continue
-		}
-
-		log.Printf("Successfully transferred stats for %s to MongoDB", key)
+	resp, err := t.RoundTrip(req)
+	if err != nil {
+		log.Fatalln(err)
+		return nil
 	}
 
-	return nil
-}
+	defer resp.Body.Close()
 
-func (tm *TaskManager) fetchingNetworkStats() error {
-	log.Println("Fetching Network Statistics...")
-
-	if tm.monitor == nil {
-		return fmt.Errorf("monitor not initialized")
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %v", err)
 	}
 
-	stats := tm.monitor.GetStats()
-	log.Println("Current Network Statistics:")
-
-	var pairs []string
-	for key := range stats {
-		pairs = append(pairs, key)
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("failed to unmarshal response: %v", err)
 	}
-	sort.Strings(pairs)
 
+	dataBytes, _ := json.Marshal(result["data"])
+
+	var sessions []Session
+	if err := json.Unmarshal(dataBytes, &sessions); err != nil {
+		return fmt.Errorf("failed to unmarshal sessions: %v", err)
+	}
+
+	aggregatedStats := make(map[string]*IPStats)
+
+	for _, session := range sessions {
+		if session.ID == tm.lastID && tm.lastID != "" {
+			break
+		}
+
+		if len(session.DNS.Host) > 0 {
+			req, _ := http.NewRequest("GET", tm.uri+"/api/session/localhost/"+session.ID+"/detail", nil)
+			resp, _ := t.RoundTrip(req)
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			re := regexp.MustCompile(`expr="ip.dns" value="\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+			ips := re.FindAllString(string(body), -1)
+
+			if len(ips) > 0 {
+				for _, ip := range ips {
+					ipAddr := ip[21:]
+					if _, exists := tm.dnsStats[ipAddr]; !exists {
+						tm.dnsStats[ipAddr] = &DNSStats{
+							DNS: session.DNS.Host[0],
+						}
+					}
+				}
+			}
+		} else if session.TotDataBytes > 0 {
+			destIP := session.Destination.IP
+			if _, exists := aggregatedStats[destIP]; !exists {
+				aggregatedStats[destIP] = &IPStats{
+					User: session.Source.IP,
+				}
+			}
+
+			stats := aggregatedStats[destIP]
+			stats.TotalBytes += session.TotDataBytes
+		}
+	}
+
+	tm.lastID = sessions[0].ID
+
+	collection := tm.mongoClient.Database("network_stats").Collection("traffic_stats")
 	ctx := context.Background()
 
-	for _, pair := range pairs {
-		stat := stats[pair]
-		ip1HostName := tm.dnsCache.GetDomainOrIP(stat.IP1)
-		ip2HostName := tm.dnsCache.GetDomainOrIP(stat.IP2)
+	for _, stats := range tm.dnsStats {
+		log.Println(stats.DNS)
+	}
 
-		statsEntry := map[string]interface{}{
-			"ip1":          ip1HostName,
-			"ip2":          ip2HostName,
-			"bytes":        utils.HumanizeBytes(stat.Bytes),
-			"packets":      stat.Packets,
-			"last_updated": stat.LastUpdated,
-			"timestamp":    time.Now(),
+	log.Println("DNS Found:", len(tm.dnsStats))
+	log.Println("IP Found:", len(aggregatedStats))
+	log.Println("--------------------------------")
+
+	for destIP, stats := range aggregatedStats {
+		var domain = destIP
+		if dnsInfo, exists := tm.dnsStats[destIP]; exists {
+			domain = dnsInfo.DNS
 		}
 
-		statsKey := fmt.Sprintf("network_stats:%s:%s", ip1HostName, ip2HostName)
+		// First, try to find existing document
+		filter := bson.M{"domain": domain, "user": stats.User}
+		var existingStats DomainStats
+		err := collection.FindOne(ctx, filter).Decode(&existingStats)
 
-		statsJSON, err := json.Marshal(statsEntry)
+		if err == mongo.ErrNoDocuments {
+			// Document doesn't exist, create new one
+			newStats := DomainStats{
+				Domain:     domain,
+				TotalBytes: int64(stats.TotalBytes),
+				User:       stats.User,
+			}
+			_, err = collection.InsertOne(ctx, newStats)
+		} else if err == nil {
+			// Document exists, update with sum of old and new bytes
+			update := bson.M{
+				"$set": bson.M{
+					"totalbytes": existingStats.TotalBytes + int64(stats.TotalBytes),
+				},
+			}
+			_, err = collection.UpdateOne(ctx, filter, update)
+		}
+
 		if err != nil {
-			log.Printf("Error marshaling stats for %s: %v", statsKey, err)
-			continue
+			return fmt.Errorf("failed to update domain stats: %v", err)
 		}
-
-		err = tm.redisClient.Set(ctx, statsKey, string(statsJSON), 7*24*time.Hour).Err()
-		if err != nil {
-			log.Printf("Error saving stats to Redis for %s: %v", statsKey, err)
-			continue
-		}
-
-		log.Printf("Connection between %s and %s:\n\tBytes: %s\n\tPackets: %d\n\tLast Updated: %v",
-			ip1HostName,
-			ip2HostName,
-			utils.HumanizeBytes(stat.Bytes),
-			stat.Packets,
-			stat.LastUpdated,
-		)
 	}
 
 	return nil
