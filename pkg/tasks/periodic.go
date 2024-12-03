@@ -228,14 +228,6 @@ func (tm *TaskManager) sendingStatsToMongo() error {
 	collection := tm.mongoClient.Database("network_stats").Collection("traffic_stats")
 	ctx := context.Background()
 
-	for _, stats := range tm.dnsStats {
-		log.Println(stats.DNS)
-	}
-
-	log.Println("DNS Found:", len(tm.dnsStats))
-	log.Println("IP Found:", len(aggregatedStats))
-	log.Println("--------------------------------")
-
 	for destIP, stats := range aggregatedStats {
 		var domain = destIP
 		if dnsInfo, exists := tm.dnsStats[destIP]; exists {
