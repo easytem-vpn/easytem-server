@@ -58,6 +58,7 @@ func main() {
 
 	// Routes
 	r.POST("/social-login", api.HandleSocialLogin(authConfig))
+	r.POST("/connectivity", api.HandleMobileInfo())
 
 	protected := r.Group("/")
 	protected.Use(auth.AuthMiddleware(authConfig))
