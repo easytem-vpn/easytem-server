@@ -184,6 +184,11 @@ func (tm *TaskManager) sendingStatsToMongo() error {
 	if err := json.Unmarshal(dataBytes, &sessions); err != nil {
 		return fmt.Errorf("failed to unmarshal sessions: %v", err)
 	}
+	
+	log.Println(len(sessions))
+	if len( sessions ) == 0 {
+		return nil
+	}
 
 	aggregatedStats := make(map[string]*IPStats)
 
@@ -223,18 +228,11 @@ func (tm *TaskManager) sendingStatsToMongo() error {
 		}
 	}
 
+	log.Println("seding")
 	tm.lastID = sessions[0].ID
 
-	collection := tm.mongoClient.Database("network_stats").Collection("traffic_stats")
+	collection := tm.mongoClient.Database("easytemdb").Collection("traffic_stats")
 	ctx := context.Background()
-
-	for _, stats := range tm.dnsStats {
-		log.Println(stats.DNS)
-	}
-
-	log.Println("DNS Found:", len(tm.dnsStats))
-	log.Println("IP Found:", len(aggregatedStats))
-	log.Println("--------------------------------")
 
 	for destIP, stats := range aggregatedStats {
 		var domain = destIP
