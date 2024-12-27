@@ -65,7 +65,7 @@ func main() {
 
 	// Routes
 	r.POST("/social-login", api.HandleSocialLogin(authConfig))
-	r.POST("/connectivity", api.HandleMobileInfo(rdb))
+	r.GET("/connectivity", api.HandleMobileInfo(rdb))
 	r.GET("/del-connect", api.DelMobileInfo(rdb))
 
 	protected := r.Group("/")

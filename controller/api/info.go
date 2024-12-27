@@ -12,18 +12,16 @@ var ctx = context.Background()
 
 func HandleMobileInfo(rdb *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var request struct {
-			Netype string `json:"type" binding:"required"`
-		}
+		netype := c.Query("netype")
 
-		if err := c.BindJSON(&request); err != nil {
+		if netype == "" {
 			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Invalid request format",
+				"error": "Missing 'netype' query parameter",
 			})
 			return
 		}
 
-		err := rdb.Set(ctx, c.ClientIP(), request.Netype, 0).Err()
+		err := rdb.Set(ctx, c.ClientIP(), netype, 0).Err()
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error": "Failed to store Netype in Redis",
