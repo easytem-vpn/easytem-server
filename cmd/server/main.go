@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 )
 
 var (
@@ -21,6 +22,7 @@ var (
 	JWT_SECRET  string
 	JWT_EXPIRY  time.Duration
 	taskManager *tasks.TaskManager
+	rdb         *redis.Client
 )
 
 func main() {
@@ -56,9 +58,14 @@ func main() {
 		JWTExpiry: JWT_EXPIRY,
 	}
 
+	rdb = redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+	})
+
 	// Routes
 	r.POST("/social-login", api.HandleSocialLogin(authConfig))
-	r.POST("/connectivity", api.HandleMobileInfo())
+	r.POST("/connectivity", api.HandleMobileInfo(rdb))
+	r.GET("/del-connect", api.DelMobileInfo(rdb))
 
 	protected := r.Group("/")
 	protected.Use(auth.AuthMiddleware(authConfig))

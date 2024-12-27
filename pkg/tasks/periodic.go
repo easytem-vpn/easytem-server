@@ -12,10 +12,13 @@ import (
 	"time"
 
 	"github.com/icholy/digest"
+	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
+
+var ctx = context.Background()
 
 type TaskManager struct {
 	stopChan     chan struct{}
@@ -26,6 +29,7 @@ type TaskManager struct {
 	dnsStats     map[string]*DNSStats
 	lastStopTime int64
 	lastID       string
+	redisClient  *redis.Client
 }
 
 type Session struct {
@@ -78,6 +82,7 @@ type DomainStats struct {
 	Domain     string `json:"domain"`
 	TotalBytes int64  `json:"total_bytes"`
 	User       string `json:"user"`
+	NetType    string `json:"net_type"`
 }
 
 func NewTaskManager(mongoURI string) (*TaskManager, error) {
@@ -93,6 +98,10 @@ func NewTaskManager(mongoURI string) (*TaskManager, error) {
 		return nil, fmt.Errorf("failed to ping MongoDB: %v", err)
 	}
 
+	redisClient := redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+	})
+
 	return &TaskManager{
 		stopChan:     make(chan struct{}),
 		mongoClient:  mongoClient,
@@ -102,6 +111,7 @@ func NewTaskManager(mongoURI string) (*TaskManager, error) {
 		dnsStats:     make(map[string]*DNSStats),
 		lastStopTime: time.Now().Unix() - 300,
 		lastID:       "",
+		redisClient:  redisClient,
 	}, nil
 }
 
@@ -141,6 +151,7 @@ func (tm *TaskManager) runPeriodicTasks(task1Interval time.Duration) {
 }
 
 func (tm *TaskManager) sendingStatsToMongo() error {
+
 	currentTime := time.Now().Unix()
 	startTime := tm.lastStopTime
 	tm.lastStopTime = currentTime
@@ -244,6 +255,13 @@ func (tm *TaskManager) sendingStatsToMongo() error {
 
 		// First, try to find existing document
 		filter := bson.M{"domain": domain, "user": stats.User}
+
+		netype, value_err := tm.redisClient.Get(ctx, stats.User).Result()
+
+		if value_err == redis.Nil {
+			netype = "wifi"
+		}
+
 		var existingStats DomainStats
 		err := collection.FindOne(ctx, filter).Decode(&existingStats)
 
@@ -253,10 +271,10 @@ func (tm *TaskManager) sendingStatsToMongo() error {
 				Domain:     domain,
 				TotalBytes: int64(stats.TotalBytes),
 				User:       stats.User,
+				NetType:    netype,
 			}
 			_, err = collection.InsertOne(ctx, newStats)
 		} else if err == nil {
-			// Document exists, update with sum of old and new bytes
 			update := bson.M{
 				"$set": bson.M{
 					"totalbytes": existingStats.TotalBytes + int64(stats.TotalBytes),
