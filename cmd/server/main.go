@@ -25,7 +25,7 @@ var (
 
 func main() {
 	gin.SetMode(gin.ReleaseMode)
-	
+
 	r := gin.Default()
 
 	err := godotenv.Load()
@@ -60,6 +60,7 @@ func main() {
 
 	// Routes
 	r.POST("/social-login", api.HandleSocialLogin(authConfig))
+	r.POST("/connectivity", api.HandleMobileInfo())
 
 	protected := r.Group("/")
 	protected.Use(auth.AuthMiddleware(authConfig))
