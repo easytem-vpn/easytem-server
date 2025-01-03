@@ -263,7 +263,7 @@ func (tm *TaskManager) sendingStatsToMongo() error {
 		netype, value_err := tm.redisClient.Get(ctx, stats.User).Result()
 
 		if value_err == redis.Nil {
-			netype = "wifi"
+			netype = "Mobile"
 		}
 
 		var existingStats DomainStats
